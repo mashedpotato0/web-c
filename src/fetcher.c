@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include "fetcher.h"
 
 #define BUFFER_SIZE 4096
@@ -11,7 +13,6 @@
 char* fetch_html(const char *hostname, const char *port, const char *path, size_t *out_size) {
     char request[1024];
 
-    // add user-agent and accept headers to pretend we are a real modern browser
     snprintf(request, sizeof(request),
              "GET %s HTTP/1.0\r\n"
              "Host: %s\r\n"
@@ -48,11 +49,50 @@ char* fetch_html(const char *hostname, const char *port, const char *path, size_
     }
     freeaddrinfo(res);
 
+    int is_https = (strcmp(port, "443") == 0);
+    SSL_CTX *ctx = NULL;
+    SSL *ssl = NULL;
+
+    if (is_https) {
+        SSL_library_init();
+        OpenSSL_add_all_algorithms();
+        SSL_load_error_strings();
+
+        ctx = SSL_CTX_new(TLS_client_method());
+        if (!ctx) {
+            perror("ssl context failed");
+            close(sockfd);
+            return NULL;
+        }
+
+        ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, sockfd);
+        SSL_set_tlsext_host_name(ssl, hostname);
+
+        if (SSL_connect(ssl) <= 0) {
+            ERR_print_errors_fp(stderr);
+            SSL_free(ssl);
+            SSL_CTX_free(ctx);
+            close(sockfd);
+            return NULL;
+        }
+    }
+
     printf("sending http request...\n");
-    if (send(sockfd, request, strlen(request), 0) == -1) {
-        perror("error sending request");
-        close(sockfd);
-        return NULL;
+    if (is_https) {
+        if (SSL_write(ssl, request, strlen(request)) <= 0) {
+            perror("ssl write failed");
+            SSL_free(ssl);
+            SSL_CTX_free(ctx);
+            close(sockfd);
+            return NULL;
+        }
+    } else {
+        if (send(sockfd, request, strlen(request), 0) == -1) {
+            perror("error sending request");
+            close(sockfd);
+            return NULL;
+        }
     }
 
     printf("receiving data...\n");
@@ -64,8 +104,17 @@ char* fetch_html(const char *hostname, const char *port, const char *path, size_
     char buffer[BUFFER_SIZE];
     ssize_t bytes_received;
 
-    while ((bytes_received = recv(sockfd, buffer, BUFFER_SIZE, 0)) > 0) {
-        // +1 ensures space for the null terminator
+    while (1) {
+        if (is_https) {
+            bytes_received = SSL_read(ssl, buffer, BUFFER_SIZE);
+        } else {
+            bytes_received = recv(sockfd, buffer, BUFFER_SIZE, 0);
+        }
+
+        if (bytes_received <= 0) {
+            break;
+        }
+
         if (total_size + bytes_received + 1 > capacity) {
             capacity *= 2;
             response = realloc(response, capacity);
@@ -74,15 +123,18 @@ char* fetch_html(const char *hostname, const char *port, const char *path, size_
         total_size += bytes_received;
     }
 
+    if (is_https) {
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+    }
     close(sockfd);
 
-    if (bytes_received == -1) {
+    if (bytes_received < 0) {
         perror("error receiving data");
         free(response);
         return NULL;
     }
 
-    // null-terminate the buffer for safe string processing
     response[total_size] = '\0';
     *out_size = total_size;
 

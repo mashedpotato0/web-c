@@ -43,7 +43,7 @@ int init_renderer() {
     return 0;
 }
 
-static void draw_node(dom_node *node, int *current_y) {
+static void draw_node(dom_node *node, int *current_y, int scroll_y) {
     if (!node) return;
 
     if (node->type == NODE_ELEMENT && node->tag) {
@@ -82,11 +82,12 @@ static void draw_node(dom_node *node, int *current_y) {
                 SDL_Surface *surface = TTF_RenderText_Blended_Wrapped(current_font, node->text, current_color, 780);
                 if (surface) {
                     SDL_Texture *texture = SDL_CreateTextureFromSurface(sdl_renderer, surface);
-                    SDL_Rect dest = { 10, *current_y, surface->w, surface->h };
+
+                    SDL_Rect dest = { 10, *current_y - scroll_y, surface->w, surface->h };
 
                     if (node->parent) {
                         node->parent->layout.x = dest.x;
-                        node->parent->layout.y = dest.y;
+                        node->parent->layout.y = *current_y;
                         node->parent->layout.w = dest.w;
                         node->parent->layout.h = dest.h;
                     }
@@ -102,13 +103,16 @@ static void draw_node(dom_node *node, int *current_y) {
     }
 
     for (int i = 0; i < node->child_count; i++) {
-        draw_node(node->children[i], current_y);
+        draw_node(node->children[i], current_y, scroll_y);
     }
 }
 
-void render_tree(dom_node *root, const char *url_text) {
+void render_tree(dom_node *root, const char *url_text, int scroll_y) {
     SDL_SetRenderDrawColor(sdl_renderer, 255, 255, 255, 255);
     SDL_RenderClear(sdl_renderer);
+
+    int start_y = 50;
+    draw_node(root, &start_y, scroll_y);
 
     SDL_Rect url_rect = {0, 0, 800, 40};
     SDL_SetRenderDrawColor(sdl_renderer, 200, 200, 200, 255);
@@ -125,9 +129,6 @@ void render_tree(dom_node *root, const char *url_text) {
             SDL_FreeSurface(surface);
         }
     }
-
-    int start_y = 50;
-    draw_node(root, &start_y);
 
     SDL_RenderPresent(sdl_renderer);
 }
