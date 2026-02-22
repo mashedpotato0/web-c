@@ -17,7 +17,7 @@ char* fetch_html(const char *hostname, const char *port, const char *path, size_
              "GET %s HTTP/1.0\r\n"
              "Host: %s\r\n"
              "User-Agent: Mozilla/5.0 (X11; Linux x86_64) C-Browser/1.0\r\n"
-             "Accept: text/html, */*\r\n"
+             "Accept: text/html, image/png, image/jpeg, */*\r\n"
              "Connection: close\r\n\r\n", path, hostname);
 
     int sockfd;
@@ -27,22 +27,17 @@ char* fetch_html(const char *hostname, const char *port, const char *path, size_
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
-    printf("resolving %s...\n", hostname);
     if (getaddrinfo(hostname, port, &hints, &res) != 0) {
-        perror("error resolving hostname");
         return NULL;
     }
 
     sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sockfd == -1) {
-        perror("error creating socket");
         freeaddrinfo(res);
         return NULL;
     }
 
-    printf("connecting to server...\n");
     if (connect(sockfd, res->ai_addr, res->ai_addrlen) == -1) {
-        perror("error connecting");
         close(sockfd);
         freeaddrinfo(res);
         return NULL;
@@ -59,18 +54,13 @@ char* fetch_html(const char *hostname, const char *port, const char *path, size_
         SSL_load_error_strings();
 
         ctx = SSL_CTX_new(TLS_client_method());
-        if (!ctx) {
-            perror("ssl context failed");
-            close(sockfd);
-            return NULL;
-        }
+        if (!ctx) { close(sockfd); return NULL; }
 
         ssl = SSL_new(ctx);
         SSL_set_fd(ssl, sockfd);
         SSL_set_tlsext_host_name(ssl, hostname);
 
         if (SSL_connect(ssl) <= 0) {
-            ERR_print_errors_fp(stderr);
             SSL_free(ssl);
             SSL_CTX_free(ctx);
             close(sockfd);
@@ -78,29 +68,19 @@ char* fetch_html(const char *hostname, const char *port, const char *path, size_
         }
     }
 
-    printf("sending http request...\n");
     if (is_https) {
         if (SSL_write(ssl, request, strlen(request)) <= 0) {
-            perror("ssl write failed");
-            SSL_free(ssl);
-            SSL_CTX_free(ctx);
-            close(sockfd);
-            return NULL;
+            SSL_free(ssl); SSL_CTX_free(ctx); close(sockfd); return NULL;
         }
     } else {
         if (send(sockfd, request, strlen(request), 0) == -1) {
-            perror("error sending request");
-            close(sockfd);
-            return NULL;
+            close(sockfd); return NULL;
         }
     }
-
-    printf("receiving data...\n");
 
     size_t total_size = 0;
     size_t capacity = 8192;
     char *response = malloc(capacity);
-
     char buffer[BUFFER_SIZE];
     ssize_t bytes_received;
 
@@ -111,9 +91,7 @@ char* fetch_html(const char *hostname, const char *port, const char *path, size_
             bytes_received = recv(sockfd, buffer, BUFFER_SIZE, 0);
         }
 
-        if (bytes_received <= 0) {
-            break;
-        }
+        if (bytes_received <= 0) break;
 
         if (total_size + bytes_received + 1 > capacity) {
             capacity *= 2;
@@ -130,7 +108,6 @@ char* fetch_html(const char *hostname, const char *port, const char *path, size_
     close(sockfd);
 
     if (bytes_received < 0) {
-        perror("error receiving data");
         free(response);
         return NULL;
     }

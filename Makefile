@@ -1,33 +1,24 @@
-# compiler settings
 CC = gcc
 CFLAGS = -Wall -Iinclude
-LDFLAGS = -lSDL2 -lSDL2_ttf -lssl -lcrypto
+LDFLAGS = -lSDL2 -lSDL2_ttf -lSDL2_image -lssl -lcrypto
 
-# directories
 SRC_DIR = src
-INC_DIR = include
 BUILD_DIR = build
-
-# files
-SRCS = $(wildcard $(SRC_DIR)/*.c)
-OBJS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 TARGET = browser
 
-# default target
-all: $(TARGET)
+SRCS = $(wildcard $(SRC_DIR)/*.c)
+OBJS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 
-# link the final executable
-$(TARGET): $(OBJS)
-	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+all: $(BUILD_DIR) $(TARGET)
 
-# compile c files into object files
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# create build directory
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-# clean up
+$(TARGET): $(OBJS)
+	$(CC) $(OBJS) -o $(TARGET) $(LDFLAGS)
+
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) temp_page.html
