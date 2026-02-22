@@ -10,9 +10,13 @@
 
 char* fetch_html(const char *hostname, const char *port, const char *path, size_t *out_size) {
     char request[1024];
+
+    // add user-agent and accept headers to pretend we are a real modern browser
     snprintf(request, sizeof(request),
              "GET %s HTTP/1.0\r\n"
              "Host: %s\r\n"
+             "User-Agent: Mozilla/5.0 (X11; Linux x86_64) C-Browser/1.0\r\n"
+             "Accept: text/html, */*\r\n"
              "Connection: close\r\n\r\n", path, hostname);
 
     int sockfd;
