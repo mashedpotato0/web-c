@@ -24,6 +24,17 @@ dom_node* find_text_input(dom_node *node) {
     return NULL;
 }
 
+dom_node* find_element_by_id(dom_node *node, const char *id) {
+    if (!node || !id) return NULL;
+    const char *node_id = get_attribute(node, "id");
+    if (node_id && strcmp(node_id, id) == 0) return node;
+    for (int i = 0; i < node->child_count; i++) {
+        dom_node *res = find_element_by_id(node->children[i], id);
+        if (res) return res;
+    }
+    return NULL;
+}
+
 void submit_form(dom_node *node, char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, dom_node **focused_node, int download_assets) {
     dom_node *form = node;
     while (form && (!form->tag || strcasecmp(form->tag, "form") != 0)) {
@@ -93,6 +104,18 @@ int check_click(dom_node *node, int mx, int my, char *url_buffer, dom_node **tre
     if (is_inside) {
         if (node->tag && strcasecmp(node->tag, "a") == 0 && node->href) {
             printf("clicked link: %s\n", node->href);
+
+            if (node->href[0] == '#') {
+                printf("scrolling to fragment: %s\n", node->href);
+                dom_node *target = find_element_by_id(*tree, node->href + 1);
+                if (target) {
+                    *scroll_y = target->layout.y > 40 ? target->layout.y - 40 : 0;
+                } else {
+                    printf("fragment not found in dom\n");
+                }
+                return 1;
+            }
+
             if (strncmp(node->href, "javascript:", 11) == 0 || strncmp(node->href, "mailto:", 7) == 0) {
                 printf("ignoring unsupported protocol\n");
                 return 1;
@@ -126,8 +149,16 @@ int check_click(dom_node *node, int mx, int my, char *url_buffer, dom_node **tre
                 if (p_delim) *p_delim = '\0';
 
                 char *last_slash = strrchr(base_url, '/');
-                if (last_slash && last_slash > strchr(base_url, ':') + 2) *(last_slash + 1) = '\0';
-                else if (!last_slash) strcat(base_url, "/");
+                char *colon = strchr(base_url, ':');
+
+                if (last_slash && colon && last_slash > colon + 2) {
+                    *(last_slash + 1) = '\0';
+                } else if (last_slash && !colon) {
+                    *(last_slash + 1) = '\0';
+                } else if (!last_slash) {
+                    strcat(base_url, "/");
+                }
+
                 snprintf(target_url, MAX_URL * 3, "%s%s", base_url, node->href);
                 free(base_url);
             }
@@ -280,8 +311,8 @@ void load_url(char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, d
 }
 
 int main() {
-    int make_temp = 1;         // saves the raw html page
-    int download_assets = 1;   // saves all css and image files into temp_assets folder
+    int make_temp = 1;
+    int download_assets = 1;
 
     char url_buffer[MAX_URL] = "en.wikipedia.org/wiki/Donkey_Kong_(character)";
     dom_node *tree = NULL;

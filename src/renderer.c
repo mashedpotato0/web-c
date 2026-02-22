@@ -14,11 +14,41 @@
 #define WIN_W 1280
 #define WIN_H 720
 
+#define WRAP_NEWLINE(c, h_val) \
+do { \
+    (c)->y += (c)->line_h + 4; \
+    (c)->line_h = (h_val); \
+    int new_left = (c)->base_left; \
+    if ((c)->y >= (c)->float_l_y && (c)->y < (c)->float_l_bottom) { \
+        if (new_left < (c)->float_l_right) new_left = (c)->float_l_right; \
+    } \
+    (c)->left_edge = new_left; \
+    (c)->x = (c)->left_edge; \
+} while(0)
+
 static SDL_Window *window = NULL;
 static SDL_Renderer *sdl_renderer = NULL;
 
 static TTF_Font *fonts[7] = {NULL};
 static int font_sizes[7] = {12, 14, 16, 20, 24, 28, 32};
+
+typedef struct {
+    int x;
+    int y;
+    int line_h;
+    int left_edge;
+    int base_left;
+    int max_w;
+    int scroll_y;
+    int float_r_x;
+    int float_r_y;
+    int float_r_bottom;
+    int float_l_right;
+    int float_l_y;
+    int float_l_bottom;
+    dom_node *focused;
+    int is_dry_run;
+} render_ctx;
 
 int init_renderer() {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) return -1;
@@ -35,7 +65,6 @@ int init_renderer() {
 
     SDL_SetRenderDrawBlendMode(sdl_renderer, SDL_BLENDMODE_BLEND);
 
-    // pre-load typography hierarchy
     for (int i = 0; i < 7; i++) {
         fonts[i] = TTF_OpenFont("font.ttf", font_sizes[i]);
     }
@@ -45,7 +74,6 @@ int init_renderer() {
 
 static int is_block(const char *tag) {
     if (!tag) return 0;
-    // exclude td and th so tables format horizontally
     const char *blocks[] = {"div", "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "br", "hr", "table", "tr", "tbody", "thead", "body", "html", "form", "header", "footer", "nav", "section", "main", "aside", "figure", "dt", "dd", "dl", "center", NULL};
     for (int i = 0; blocks[i]; i++) {
         if (strcasecmp(tag, blocks[i]) == 0) return 1;
@@ -68,6 +96,16 @@ static void expand_rect(dom_node *node, int ex, int ey, int ew, int eh) {
         }
         p = p->parent;
     }
+}
+
+static int get_css_len(dom_node *node, const char *prop, int def, int parent_ref) {
+    const char *val = get_style(node, prop);
+    if (!val) return def;
+    int num = atoi(val);
+    if (strstr(val, "px")) return num;
+    if (strstr(val, "em") || strstr(val, "rem")) return num * 16;
+    if (strstr(val, "%")) return (num * parent_ref) / 100;
+    return num;
 }
 
 void load_images(dom_node *node, const char *base_url, int download_assets) {
@@ -158,24 +196,34 @@ void load_images(dom_node *node, const char *base_url, int download_assets) {
     }
 }
 
-static void draw_text(SDL_Renderer *rend, TTF_Font *font, const char *text, SDL_Color color, int *x, int *y, int *line_h, int left_edge, int scroll_y, dom_node *parent, int is_dry_run) {
+static void draw_text(SDL_Renderer *rend, TTF_Font *font, const char *text, SDL_Color color, render_ctx *ctx, dom_node *parent) {
     char word[1024];
     int i = 0, j = 0;
     int space_w = 0, space_h = 0;
 
     if (font) TTF_SizeUTF8(font, " ", &space_w, &space_h);
-    if (*line_h < space_h) *line_h = space_h;
+    if (ctx->line_h < space_h) ctx->line_h = space_h;
 
     while (text[i]) {
+        int right_bound = ctx->max_w - 20;
+        if (ctx->y >= ctx->float_r_y && ctx->y < ctx->float_r_bottom) {
+            right_bound = ctx->float_r_x - 20;
+        }
+
         int has_space = 0;
         while (text[i] && isspace((unsigned char)text[i])) {
             has_space = 1; i++;
         }
 
-        if (*x > left_edge && has_space) {
-            *x += space_w;
-            if (*x > WIN_W - 20) {
-                *x = left_edge; *y += *line_h + 4; *line_h = space_h;
+        if (ctx->x > ctx->left_edge && has_space) {
+            ctx->x += space_w;
+            if (ctx->x > right_bound) {
+                WRAP_NEWLINE(ctx, space_h);
+                if (ctx->y >= ctx->float_r_y && ctx->y < ctx->float_r_bottom) {
+                    right_bound = ctx->float_r_x - 20;
+                } else {
+                    right_bound = ctx->max_w - 20;
+                }
             }
         }
 
@@ -188,36 +236,39 @@ static void draw_text(SDL_Renderer *rend, TTF_Font *font, const char *text, SDL_
         int w = 0, h = 0;
         if (font) TTF_SizeUTF8(font, word, &w, &h);
 
-        // wrap to dynamic local indentation
-        if (*x + w > WIN_W - 20) {
-            *x = left_edge;
-            *y += *line_h + 4;
-            *line_h = h;
-        } else if (h > *line_h) {
-            *line_h = h;
+        if (ctx->y >= ctx->float_r_y && ctx->y < ctx->float_r_bottom) {
+            right_bound = ctx->float_r_x - 20;
+        } else {
+            right_bound = ctx->max_w - 20;
+        }
+
+        if (ctx->x + w > right_bound) {
+            WRAP_NEWLINE(ctx, h);
+        } else if (h > ctx->line_h) {
+            ctx->line_h = h;
         }
 
         if (font) {
-            if (!is_dry_run) {
-                SDL_Surface *surf = TTF_RenderUTF8_Blended(font, word, color);
-                if (surf) {
-                    SDL_Texture *tex = SDL_CreateTextureFromSurface(rend, surf);
-                    int draw_y = *y - scroll_y;
-                    if (draw_y + h > 40 && draw_y < WIN_H) {
-                        SDL_Rect dest = {*x, draw_y, w, h};
+            if (!ctx->is_dry_run) {
+                int draw_y = ctx->y - ctx->scroll_y;
+                if (draw_y + h > 40 && draw_y < WIN_H) {
+                    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, word, color);
+                    if (surf) {
+                        SDL_Texture *tex = SDL_CreateTextureFromSurface(rend, surf);
+                        SDL_Rect dest = {ctx->x, draw_y, w, h};
                         SDL_RenderCopy(rend, tex, NULL, &dest);
+                        SDL_DestroyTexture(tex);
+                        SDL_FreeSurface(surf);
                     }
-                    SDL_DestroyTexture(tex);
-                    SDL_FreeSurface(surf);
                 }
             }
-            if (is_dry_run && parent) expand_rect(parent, *x, *y, w, h);
+            if (ctx->is_dry_run && parent) expand_rect(parent, ctx->x, ctx->y, w, h);
         }
-        *x += w;
+        ctx->x += w;
     }
 }
 
-static void draw_node(dom_node *node, int *x, int *y, int *line_h, int left_edge, int scroll_y, dom_node *focused_node, int is_dry_run) {
+static void draw_node(dom_node *node, render_ctx *ctx) {
     if (!node) return;
 
     if (node->type == NODE_ELEMENT && node->tag) {
@@ -232,15 +283,14 @@ static void draw_node(dom_node *node, int *x, int *y, int *line_h, int left_edge
             return;
         }
 
-        // draw backgrounds calculated by pass 1
-        if (!is_dry_run && node->layout.w > 0 && node->layout.h > 0) {
-            const char *bg = get_style(node, "background-color");
-            if (!bg) bg = get_style(node, "background");
-            if (bg) {
-                SDL_Color col = parse_css_color(bg, (SDL_Color){0,0,0,0});
-                if (col.a > 0) {
-                    SDL_Rect r = { node->layout.x, node->layout.y - scroll_y, node->layout.w, node->layout.h };
-                    if (r.y + r.h > 40 && r.y < WIN_H) {
+        if (!ctx->is_dry_run && node->layout.w > 0 && node->layout.h > 0) {
+            SDL_Rect r = { node->layout.x, node->layout.y - ctx->scroll_y, node->layout.w, node->layout.h };
+            if (r.y + r.h > 40 && r.y < WIN_H) {
+                const char *bg = get_style(node, "background-color");
+                if (!bg) bg = get_style(node, "background");
+                if (bg && !strstr(bg, "transparent") && !strstr(bg, "none")) {
+                    SDL_Color col = parse_css_color(bg, (SDL_Color){0,0,0,0});
+                    if (col.a > 0) {
                         SDL_SetRenderDrawColor(sdl_renderer, col.r, col.g, col.b, col.a);
                         SDL_RenderFillRect(sdl_renderer, &r);
                     }
@@ -253,7 +303,7 @@ static void draw_node(dom_node *node, int *x, int *y, int *line_h, int left_edge
             if (strcasecmp(node->tag, "td") == 0 || strcasecmp(node->tag, "th") == 0) has_border = 1;
 
             if (has_border) {
-                SDL_Rect r = { node->layout.x, node->layout.y - scroll_y, node->layout.w, node->layout.h };
+                SDL_Rect r = { node->layout.x, node->layout.y - ctx->scroll_y, node->layout.w, node->layout.h };
                 if (r.y + r.h > 40 && r.y < WIN_H) {
                     SDL_SetRenderDrawColor(sdl_renderer, 200, 200, 200, 255);
                     SDL_RenderDrawRect(sdl_renderer, &r);
@@ -262,46 +312,116 @@ static void draw_node(dom_node *node, int *x, int *y, int *line_h, int left_edge
         }
     }
 
-    int current_left = left_edge;
-    int is_blk = 0;
+    int mt = get_css_len(node, "margin-top", 0, ctx->max_w);
+    int mb = get_css_len(node, "margin-bottom", 0, ctx->max_w);
+    int ml = get_css_len(node, "margin-left", 0, ctx->max_w);
+    int mr = get_css_len(node, "margin-right", 0, ctx->max_w);
+    int pt = get_css_len(node, "padding-top", 0, ctx->max_w);
+    int pb = get_css_len(node, "padding-bottom", 0, ctx->max_w);
+    int pl = get_css_len(node, "padding-left", 0, ctx->max_w);
+
+    const char *flt = get_style(node, "float");
+    int is_float_r = (flt && strstr(flt, "right") != NULL);
+    int is_float_l = (flt && strstr(flt, "left") != NULL);
+
+    if (node->tag && strcasecmp(node->tag, "table") == 0) {
+        const char *cls = get_attribute(node, "class");
+        if (cls && strstr(cls, "infobox")) is_float_r = 1;
+    }
+    if (node->tag) {
+        const char *id = get_attribute(node, "id");
+        const char *cls = get_attribute(node, "class");
+        if (id && (strcmp(id, "vector-main-menu") == 0 || strcmp(id, "mw-panel") == 0 || strcmp(id, "vector-toc") == 0 || strcmp(id, "p-lang") == 0)) {
+            is_float_l = 1;
+        }
+        if (cls && (strstr(cls, "vector-column-start") || strstr(cls, "vector-toc"))) {
+            is_float_l = 1;
+        }
+    }
+
+    int is_blk = (node->type == NODE_ELEMENT && is_block(node->tag));
+
+    const char *clr = get_style(node, "clear");
+    if (clr) {
+        if ((strstr(clr, "both") || strstr(clr, "left")) && ctx->y < ctx->float_l_bottom) {
+            ctx->y = ctx->float_l_bottom + 10;
+        }
+        if ((strstr(clr, "both") || strstr(clr, "right")) && ctx->y < ctx->float_r_bottom) {
+            ctx->y = ctx->float_r_bottom + 10;
+        }
+    }
+
+    if (is_blk || is_float_r || is_float_l) {
+        if (ctx->x > ctx->left_edge) {
+            ctx->x = ctx->left_edge;
+            ctx->y += ctx->line_h;
+            ctx->line_h = 0;
+        }
+        ctx->y += mt;
+    }
+
+    int pre_float_y = ctx->y;
+    int current_left = ctx->base_left + ml + pl;
 
     if (node->type == NODE_ELEMENT && node->tag) {
-        // structural box model offsets
-        const char *ml = get_style(node, "margin-left");
-        if (ml) current_left += atoi(ml);
-        const char *pl = get_style(node, "padding-left");
-        if (pl) current_left += atoi(pl);
-
         if (strcasecmp(node->tag, "ul") == 0 || strcasecmp(node->tag, "ol") == 0 || strcasecmp(node->tag, "blockquote") == 0) {
             current_left += 40;
         }
-
-        // horizontal table spacing
         if (strcasecmp(node->tag, "td") == 0 || strcasecmp(node->tag, "th") == 0) {
-            *x += 15;
-            current_left = *x;
+            ctx->x += 15;
+            current_left = ctx->x;
         }
+    }
 
-        if (is_block(node->tag)) {
-            is_blk = 1;
-            if (*x > current_left) {
-                *x = current_left;
-                *y += *line_h;
-                *line_h = 0;
-            }
-            if (strcasecmp(node->tag, "p") == 0 || strcasecmp(node->tag, "h1") == 0 || strcasecmp(node->tag, "h2") == 0 || strcasecmp(node->tag, "br") == 0) {
-                *y += 12;
-            }
+    int old_base_left = ctx->base_left;
+    int old_left = ctx->left_edge;
+
+    if (is_float_r) {
+        if (ctx->y >= ctx->float_r_y && ctx->y < ctx->float_r_bottom) {
+            ctx->y = ctx->float_r_bottom + 10;
         }
+        ctx->float_r_y = ctx->y;
 
-        int draw_y = *y - scroll_y;
-        if (is_dry_run || (draw_y > -500 && draw_y < WIN_H + 500)) {
+        int w = get_css_len(node, "width", 300, ctx->max_w);
+        if (w == 0) w = 300;
+        ctx->float_r_x = ctx->max_w - w - mr;
+
+        ctx->base_left = ctx->float_r_x + pl;
+        ctx->left_edge = ctx->base_left;
+        ctx->x = ctx->base_left;
+    } else if (is_float_l) {
+        if (ctx->y >= ctx->float_l_y && ctx->y < ctx->float_l_bottom) {
+            ctx->y = ctx->float_l_bottom + 10;
+        }
+        ctx->float_l_y = ctx->y;
+
+        int w = get_css_len(node, "width", 200, ctx->max_w);
+        if (w == 0) w = 200;
+        int nx = current_left + w + mr + 20;
+        if (nx > ctx->float_l_right) ctx->float_l_right = nx;
+
+        ctx->base_left = current_left;
+        ctx->left_edge = current_left;
+        ctx->x = current_left;
+    } else {
+        ctx->base_left = current_left;
+        int active_left = current_left;
+        if (ctx->y >= ctx->float_l_y && ctx->y < ctx->float_l_bottom) {
+            if (active_left < ctx->float_l_right) active_left = ctx->float_l_right;
+        }
+        ctx->left_edge = active_left;
+        if (ctx->x < active_left) ctx->x = active_left;
+    }
+
+    if (node->type == NODE_ELEMENT && node->tag) {
+        int draw_y = ctx->y - ctx->scroll_y;
+        if (ctx->is_dry_run || (draw_y > -500 && draw_y < WIN_H + 500)) {
             if (strcasecmp(node->tag, "hr") == 0) {
-                if (!is_dry_run) {
+                if (!ctx->is_dry_run) {
                     SDL_SetRenderDrawColor(sdl_renderer, 200, 200, 200, 255);
                     SDL_RenderDrawLine(sdl_renderer, current_left, draw_y + 10, WIN_W - 10, draw_y + 10);
                 }
-                *y += 20;
+                ctx->y += 20;
             } else if (strcasecmp(node->tag, "input") == 0 || strcasecmp(node->tag, "button") == 0) {
                 int is_btn = (strcasecmp(node->tag, "button") == 0 || (get_attribute(node, "type") && strcasecmp(get_attribute(node, "type"), "submit") == 0));
                 const char *label = get_attribute(node, "value");
@@ -313,16 +433,20 @@ static void draw_node(dom_node *node, int *x, int *y, int *line_h, int left_edge
                 if (btn_f && label[0] != '\0') TTF_SizeUTF8(btn_f, label, &text_w, &text_h);
                 int box_w = text_w + 20 < (is_btn ? 80 : 150) ? (is_btn ? 80 : 150) : text_w + 20;
 
-                if (*x + box_w > WIN_W - 20) { *x = current_left; *y += *line_h + 4; *line_h = 0; draw_y = *y - scroll_y; }
+                int right_bound = (ctx->y >= ctx->float_r_y && ctx->y < ctx->float_r_bottom) ? ctx->float_r_x - 20 : ctx->max_w - 20;
+                if (ctx->x + box_w > right_bound) {
+                    WRAP_NEWLINE(ctx, 0);
+                    draw_y = ctx->y - ctx->scroll_y;
+                }
 
-                if (is_dry_run) {
-                    expand_rect(node, *x, *y, box_w, 28);
+                if (ctx->is_dry_run) {
+                    expand_rect(node, ctx->x, ctx->y, box_w, 28);
                 } else {
-                    SDL_Rect box = { *x, draw_y, box_w, 28 };
+                    SDL_Rect box = { ctx->x, draw_y, box_w, 28 };
                     SDL_SetRenderDrawColor(sdl_renderer, is_btn ? 240 : 255, is_btn ? 240 : 255, is_btn ? 240 : 255, 255);
                     SDL_RenderFillRect(sdl_renderer, &box);
 
-                    if (node == focused_node) {
+                    if (node == ctx->focused) {
                         SDL_SetRenderDrawColor(sdl_renderer, 70, 130, 255, 255);
                         SDL_RenderDrawRect(sdl_renderer, &box);
                         SDL_Rect inner = {box.x + 1, box.y + 1, box.w - 2, box.h - 2};
@@ -337,41 +461,46 @@ static void draw_node(dom_node *node, int *x, int *y, int *line_h, int left_edge
                         SDL_Surface *surf = TTF_RenderUTF8_Blended(btn_f, label, col);
                         if (surf) {
                             SDL_Texture *tex = SDL_CreateTextureFromSurface(sdl_renderer, surf);
-                            SDL_Rect d = { *x + 10, draw_y + 5, surf->w, surf->h };
+                            SDL_Rect d = { ctx->x + 10, draw_y + 5, surf->w, surf->h };
                             SDL_RenderCopy(sdl_renderer, tex, NULL, &d);
                             SDL_DestroyTexture(tex);
                             SDL_FreeSurface(surf);
                         }
                     }
                 }
-                *x += box_w + 10;
-                if (*line_h < 28) *line_h = 28;
+                ctx->x += box_w + 10;
+                if (ctx->line_h < 28) ctx->line_h = 28;
             } else if (strcasecmp(node->tag, "img") == 0) {
                 int w = 50, h = 30;
                 if (node->texture) {
                     w = node->img_w; h = node->img_h;
                 }
-                if (w > WIN_W - 20) { h = h * (WIN_W - 20) / w; w = WIN_W - 20; }
-                if (*x + w > WIN_W - 20) { *x = current_left; *y += *line_h + 4; *line_h = 0; draw_y = *y - scroll_y; }
 
-                if (is_dry_run) {
-                    expand_rect(node, *x, *y, w, h);
+                int right_bound = (ctx->y >= ctx->float_r_y && ctx->y < ctx->float_r_bottom) ? ctx->float_r_x - 20 : ctx->max_w - 20;
+                if (w > right_bound - ctx->left_edge) { h = h * (right_bound - ctx->left_edge) / w; w = right_bound - ctx->left_edge; }
+                if (ctx->x + w > right_bound) {
+                    WRAP_NEWLINE(ctx, 0);
+                    draw_y = ctx->y - ctx->scroll_y;
+                }
+
+                if (ctx->is_dry_run) {
+                    expand_rect(node, ctx->x, ctx->y, w, h);
                 } else {
                     if (node->texture) {
-                        SDL_Rect dest = { *x, draw_y, w, h };
+                        SDL_Rect dest = { ctx->x, draw_y, w, h };
                         SDL_RenderCopy(sdl_renderer, (SDL_Texture*)node->texture, NULL, &dest);
                     } else {
-                        SDL_Rect box = { *x, draw_y, w, h };
+                        SDL_Rect box = { ctx->x, draw_y, w, h };
                         SDL_SetRenderDrawColor(sdl_renderer, 240, 240, 240, 255);
                         SDL_RenderFillRect(sdl_renderer, &box);
                         SDL_SetRenderDrawColor(sdl_renderer, 180, 180, 180, 255);
                         SDL_RenderDrawRect(sdl_renderer, &box);
                     }
                 }
-                *x += w + 10;
-                if (*line_h < h) *line_h = h;
+                ctx->x += w + 10;
+                if (ctx->line_h < h) ctx->line_h = h;
             } else if (strcasecmp(node->tag, "li") == 0) {
-                if (!is_dry_run) {
+                if (!ctx->is_dry_run) {
                     SDL_Rect bullet = { current_left - 15, draw_y + 8, 5, 5 };
                     SDL_SetRenderDrawColor(sdl_renderer, 100, 100, 100, 255);
                     SDL_RenderFillRect(sdl_renderer, &bullet);
@@ -397,7 +526,6 @@ static void draw_node(dom_node *node, int *x, int *y, int *line_h, int left_edge
             if (strcasecmp(p->tag, "i") == 0 || strcasecmp(p->tag, "em") == 0) is_italic = 1;
             if (strcasecmp(p->tag, "a") == 0) current_color = (SDL_Color){25, 100, 210, 255};
 
-            // css scalable text mapping
             const char *fs = get_style(p, "font-size");
             if (fs && font_idx == 2) {
                 float size = atof(fs);
@@ -435,22 +563,42 @@ static void draw_node(dom_node *node, int *x, int *y, int *line_h, int left_edge
         if (is_italic) style |= TTF_STYLE_ITALIC;
         if (current_font) TTF_SetFontStyle(current_font, style);
 
-        draw_text(sdl_renderer, current_font, node->text, current_color, x, y, line_h, current_left, scroll_y, node->parent, is_dry_run);
+        draw_text(sdl_renderer, current_font, node->text, current_color, ctx, node->parent);
 
         if (current_font) TTF_SetFontStyle(current_font, TTF_STYLE_NORMAL);
     }
 
     for (int i = 0; i < node->child_count; i++) {
-        draw_node(node->children[i], x, y, line_h, current_left, scroll_y, focused_node, is_dry_run);
+        draw_node(node->children[i], ctx);
     }
 
-    if (is_blk) {
-        *x = left_edge;
-        *y += *line_h;
-        *line_h = 0;
+    if (is_float_r) {
+        int new_bottom = ctx->y + pb + mb;
+        if (new_bottom > ctx->float_r_bottom) ctx->float_r_bottom = new_bottom;
+        ctx->y = pre_float_y;
+        ctx->x = old_left;
+        ctx->left_edge = old_left;
+        ctx->base_left = old_base_left;
+    } else if (is_float_l) {
+        int new_bottom = ctx->y + pb + mb;
+        if (new_bottom > ctx->float_l_bottom) ctx->float_l_bottom = new_bottom;
+        ctx->y = pre_float_y;
+        ctx->x = old_left;
+        ctx->left_edge = old_left;
+        ctx->base_left = old_base_left;
+    } else if (is_blk) {
+        ctx->x = old_left;
+        ctx->y += ctx->line_h;
+        ctx->line_h = 0;
         if (strcasecmp(node->tag, "p") == 0 || strcasecmp(node->tag, "h1") == 0 || strcasecmp(node->tag, "h2") == 0 || strcasecmp(node->tag, "h3") == 0 || strcasecmp(node->tag, "br") == 0) {
-            *y += 12;
+            ctx->y += 12;
         }
+        ctx->y += pb + mb;
+        ctx->left_edge = old_left;
+        ctx->base_left = old_base_left;
+    } else {
+        ctx->left_edge = old_left;
+        ctx->base_left = old_base_left;
     }
 }
 
@@ -482,15 +630,25 @@ void render_tree(dom_node *root, const char *url_text, int scroll_y, dom_node *f
     if (root) {
         reset_layouts(root);
 
-        // run layout pass
-        int layout_x = 10, layout_y = 50, layout_lh = 0;
-        draw_node(root, &layout_x, &layout_y, &layout_lh, 10, scroll_y, focused_node, 1);
+        render_ctx ctx = {0};
+        ctx.x = 10; ctx.y = 50; ctx.line_h = 0;
+        ctx.left_edge = 10; ctx.base_left = 10; ctx.max_w = WIN_W;
+        ctx.scroll_y = scroll_y; ctx.focused = focused_node;
+        ctx.float_r_x = WIN_W; ctx.float_r_y = 0; ctx.float_r_bottom = 0;
+        ctx.float_l_right = 10; ctx.float_l_y = 0; ctx.float_l_bottom = 0;
 
-        // run render pass
-        int paint_x = 10, paint_y = 50, paint_lh = 0;
-        draw_node(root, &paint_x, &paint_y, &paint_lh, 10, scroll_y, focused_node, 0);
+        ctx.is_dry_run = 1;
+        draw_node(root, &ctx);
 
-        int total_height = layout_y + layout_lh;
+        int total_height = ctx.y + ctx.line_h;
+
+        ctx.x = 10; ctx.y = 50; ctx.line_h = 0;
+        ctx.left_edge = 10; ctx.base_left = 10;
+        ctx.float_r_x = WIN_W; ctx.float_r_y = 0; ctx.float_r_bottom = 0;
+        ctx.float_l_right = 10; ctx.float_l_y = 0; ctx.float_l_bottom = 0;
+        ctx.is_dry_run = 0;
+        draw_node(root, &ctx);
+
         if (total_height > WIN_H - 40) {
             float ratio = (float)(WIN_H - 40) / total_height;
             int sb_h = (int)((WIN_H - 40) * ratio);
@@ -565,4 +723,3 @@ void cleanup_renderer() {
     TTF_Quit();
     SDL_Quit();
 }
-

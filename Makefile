@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Iinclude
-LDFLAGS = -lSDL2 -lSDL2_ttf -lSDL2_image -lssl -lcrypto
+LDFLAGS = -lSDL2 -lSDL2_ttf -lSDL2_image -lssl -lcrypto -lduktape
 
 SRC_DIR = src
 BUILD_DIR = build
@@ -21,4 +21,4 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) temp_page.html
+	rm -rf $(BUILD_DIR) $(TARGET) temp_page.html temp_assets
