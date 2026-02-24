@@ -1,6 +1,7 @@
 CC = gcc
-CFLAGS = -Wall -Iinclude
-LDFLAGS = -lSDL2 -lSDL2_ttf -lSDL2_image -lssl -lcrypto -lduktape
+# add external/clay to include path
+CFLAGS = -Wall -Iinclude -Iexternal/clay -I.
+LDFLAGS = -lSDL2 -lSDL2_ttf -lSDL2_image -lssl -lcrypto -lduktape -lm
 
 SRC_DIR = src
 BUILD_DIR = build
@@ -19,6 +20,11 @@ $(TARGET): $(OBJS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# init submodule instead of downloading
+setup:
+	git submodule update --init
+	@echo "clay submodule ready"
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) temp_page.html temp_assets

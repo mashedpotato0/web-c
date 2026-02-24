@@ -9,6 +9,8 @@
 #include "css.h"
 #include "ui.h"
 #include "interactive_ui.h"
+#include "clay.h"
+#include "clay_sdl.h"
 
 #ifndef MAX_URL
 #define MAX_URL MAX_URL_LEN
@@ -16,6 +18,7 @@
 
 void load_url(char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, dom_node **focused_node, int download_assets);
 
+// ... dom query helpers stay identical
 dom_node* find_node_by_tag(dom_node *node, const char *tag) {
     if (!node || !tag) return NULL;
     if (node->tag && strcasecmp(node->tag, tag) == 0) return node;
@@ -123,15 +126,13 @@ int submit_form(dom_node *node, char *url_buffer, dom_node **tree, int make_temp
 int check_click(dom_node *node, int mx, int my, char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, dom_node **focused_node, int download_assets) {
     if (!node) return 0;
 
-    int absolute_y = my + *scroll_y;
+    int absolute_y = my;
     int is_inside = (node->layout.w > 0 && node->layout.h > 0 &&
     mx >= node->layout.x && mx <= node->layout.x + node->layout.w &&
     absolute_y >= node->layout.y && absolute_y <= node->layout.y + node->layout.h);
 
     if (is_inside) {
         if (node->tag && strcasecmp(node->tag, "a") == 0 && node->href) {
-            printf("clicked link: %s\n", node->href);
-
             if (node->href[0] == '#') {
                 dom_node *target = find_element_by_id(*tree, node->href + 1);
                 if (target) *scroll_y = target->layout.y > 40 ? target->layout.y - 40 : 0;
@@ -225,135 +226,95 @@ void load_url(char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, d
         const char *port = "80";
 
         const char *url_start = url_buffer;
-        if (strncmp(url_start, "http://", 7) == 0) {
-            url_start += 7;
-        } else if (strncmp(url_start, "https://", 8) == 0) {
-            url_start += 8;
-            port = "443";
-        }
+        if (strncmp(url_start, "http://", 7) == 0) url_start += 7;
+            else if (strncmp(url_start, "https://", 8) == 0) { url_start += 8; port = "443"; }
 
-        const char *p_delim = strpbrk(url_start, "/?");
-        if (p_delim) {
-            size_t len = p_delim - url_start;
-            if (len >= MAX_URL) len = MAX_URL - 1;
-            strncpy(hostname, url_start, len);
-            hostname[len] = '\0';
+                const char *p_delim = strpbrk(url_start, "/?");
+                if (p_delim) {
+                    size_t len = p_delim - url_start;
+                    if (len >= MAX_URL) len = MAX_URL - 1;
+                    strncpy(hostname, url_start, len);
+                    hostname[len] = '\0';
 
-            if (*p_delim == '?') {
-                path[0] = '/';
-                strncpy(path + 1, p_delim, MAX_URL - 2);
-            } else {
-                strncpy(path, p_delim, MAX_URL - 1);
-            }
-            path[MAX_URL - 1] = '\0';
-        } else {
-            strncpy(hostname, url_start, MAX_URL - 1);
-            hostname[MAX_URL - 1] = '\0';
-            strcpy(path, "/");
-        }
+                    if (*p_delim == '?') {
+                        path[0] = '/';
+                        strncpy(path + 1, p_delim, MAX_URL - 2);
+                    } else {
+                        strncpy(path, p_delim, MAX_URL - 1);
+                    }
+                    path[MAX_URL - 1] = '\0';
+                } else {
+                    strncpy(hostname, url_start, MAX_URL - 1);
+                    hostname[MAX_URL - 1] = '\0';
+                    strcpy(path, "/");
+                }
 
-        printf("fetching %s%s...\n", hostname, path);
-        size_t data_size = 0;
-        char *raw_data = fetch_html(hostname, port, path, &data_size);
+                size_t data_size = 0;
+                char *raw_data = fetch_html(hostname, port, path, &data_size);
 
-        if (raw_data != NULL) {
-            int is_redirect = 0;
-            if (strncmp(raw_data, "HTTP/", 5) == 0) {
-                char *space = strchr(raw_data, ' ');
-                if (space) {
-                    int status = atoi(space + 1);
-                    if (status >= 300 && status < 400) {
-                        char *loc = strstr(raw_data, "\r\nLocation: ");
-                        if (!loc) loc = strstr(raw_data, "\r\nlocation: ");
-                        if (!loc) loc = strstr(raw_data, "\nLocation: ");
-                        if (loc) {
-                            loc = strchr(loc, ':') + 1;
-                            while (*loc == ' ') loc++;
-                            char *end = strstr(loc, "\r\n");
-                            if (!end) end = strchr(loc, '\n');
+                if (raw_data != NULL) {
+                    int is_redirect = 0;
+                    if (strncmp(raw_data, "HTTP/", 5) == 0) {
+                        char *space = strchr(raw_data, ' ');
+                        if (space) {
+                            int status = atoi(space + 1);
+                            if (status >= 300 && status < 400) {
+                                char *loc = strstr(raw_data, "\r\nLocation: ");
+                                if (!loc) loc = strstr(raw_data, "\r\nlocation: ");
+                                if (!loc) loc = strstr(raw_data, "\nLocation: ");
+                                if (loc) {
+                                    loc = strchr(loc, ':') + 1;
+                                    while (*loc == ' ') loc++;
+                                    char *end = strstr(loc, "\r\n");
+                                    if (!end) end = strchr(loc, '\n');
 
-                            if (end) {
-                                char new_target[MAX_URL] = {0};
-                                size_t cplen = end - loc;
-                                if (cplen >= MAX_URL) cplen = MAX_URL - 1;
-                                strncpy(new_target, loc, cplen);
+                                    if (end) {
+                                        char new_target[MAX_URL] = {0};
+                                        size_t cplen = end - loc;
+                                        if (cplen >= MAX_URL) cplen = MAX_URL - 1;
+                                        strncpy(new_target, loc, cplen);
 
-                                free(raw_data);
-                                redirect_count++;
-                                is_redirect = 1;
+                                        free(raw_data);
+                                        redirect_count++;
+                                        is_redirect = 1;
 
-                                char *new_url = calloc(1, MAX_URL * 3);
-                                if (new_target[0] == '/') {
-                                    snprintf(new_url, MAX_URL * 3, "%s://%s%s", strcmp(port, "443") == 0 ? "https" : "http", hostname, new_target);
-                                } else if (strncmp(new_target, "//", 2) == 0) {
-                                    snprintf(new_url, MAX_URL * 3, "https:%s", new_target);
-                                } else {
-                                    strncpy(new_url, new_target, (MAX_URL * 3) - 1);
+                                        char *new_url = calloc(1, MAX_URL * 3);
+                                        if (new_target[0] == '/') {
+                                            snprintf(new_url, MAX_URL * 3, "%s://%s%s", strcmp(port, "443") == 0 ? "https" : "http", hostname, new_target);
+                                        } else if (strncmp(new_target, "//", 2) == 0) {
+                                            snprintf(new_url, MAX_URL * 3, "https:%s", new_target);
+                                        } else {
+                                            strncpy(new_url, new_target, (MAX_URL * 3) - 1);
+                                        }
+
+                                        strncpy(url_buffer, new_url, MAX_URL - 1);
+                                        url_buffer[MAX_URL - 1] = '\0';
+                                        free(new_url);
+                                    }
                                 }
-
-                                strncpy(url_buffer, new_url, MAX_URL - 1);
-                                url_buffer[MAX_URL - 1] = '\0';
-                                free(new_url);
                             }
                         }
                     }
+
+                    if (!is_redirect) {
+                        if (*tree) {
+                            free_textures(*tree);
+                            free_tree(*tree);
+                            *tree = NULL;
+                        }
+                        *tree = process_response(raw_data, data_size, make_temp);
+                        if (*tree) {
+                            char base_url[MAX_URL + 16] = {0};
+                            snprintf(base_url, sizeof(base_url), "%s://%s", strcmp(port, "443") == 0 ? "https" : "http", hostname);
+                            process_css(*tree, base_url, download_assets);
+                            load_images(*tree, base_url, download_assets);
+                        }
+                        free(raw_data);
+                        break;
+                    }
+                } else {
+                    break;
                 }
-            }
-
-            if (!is_redirect) {
-                if (*tree) {
-                    free_textures(*tree);
-                    free_tree(*tree);
-                    *tree = NULL;
-                }
-                *tree = process_response(raw_data, data_size, make_temp);
-                if (*tree) {
-                    char base_url[MAX_URL + 16] = {0};
-                    snprintf(base_url, sizeof(base_url), "%s://%s", strcmp(port, "443") == 0 ? "https" : "http", hostname);
-                    process_css(*tree, base_url, download_assets);
-                    load_images(*tree, base_url, download_assets);
-                }
-                free(raw_data);
-                break;
-            }
-        } else {
-            printf("failed to fetch website data\n");
-            break;
-        }
-    }
-}
-
-void render_ui_text(SDL_Renderer *rend, browser_ui *ui) {
-    TTF_Font *font = get_ui_font();
-    if (!font) return;
-
-    int tab_w = 150;
-    for (int i = 0; i < ui->tab_count; i++) {
-        SDL_Surface *surf = TTF_RenderUTF8_Blended(font, ui->tabs[i].title, (SDL_Color){30, 30, 30, 255});
-        if (surf) {
-            SDL_Texture *tex = SDL_CreateTextureFromSurface(rend, surf);
-            int tx = 10 + (i * (tab_w + 5));
-            SDL_Rect dest = { tx + 10, 10, surf->w, surf->h };
-            if (dest.w > tab_w - 30) dest.w = tab_w - 30;
-            SDL_RenderCopy(rend, tex, NULL, &dest);
-            SDL_DestroyTexture(tex); SDL_FreeSurface(surf);
-        }
-    }
-
-    if (ui->input_buffer[0] != '\0') {
-        SDL_Surface *surf = TTF_RenderUTF8_Blended(font, ui->input_buffer, (SDL_Color){30, 30, 30, 255});
-        if (surf) {
-            SDL_Texture *tex = SDL_CreateTextureFromSurface(rend, surf);
-            SDL_Rect dest = { ui->url_box.x + 10, ui->url_box.y + 5, surf->w, surf->h };
-            if (dest.w > ui->url_box.w - 20) {
-                SDL_Rect src = {surf->w - (ui->url_box.w - 20), 0, ui->url_box.w - 20, surf->h};
-                dest.w = ui->url_box.w - 20;
-                SDL_RenderCopy(rend, tex, &src, &dest);
-            } else {
-                SDL_RenderCopy(rend, tex, NULL, &dest);
-            }
-            SDL_DestroyTexture(tex); SDL_FreeSurface(surf);
-        }
     }
 }
 
@@ -364,6 +325,11 @@ int main() {
     SDL_Renderer *rend = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
 
     if (init_renderer(rend) != 0) return 1;
+
+    // init clay layout engine
+    uint64_t clay_memory_size = Clay_MinMemorySize();
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(clay_memory_size, malloc(clay_memory_size));
+    Clay_Initialize(arena, (Clay_Dimensions) { 1280, 720 }, (Clay_ErrorHandler) { 0 });
 
     browser_ui ui;
     init_ui(&ui);
@@ -378,7 +344,10 @@ int main() {
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = 0;
+            } else if (event.type == SDL_MOUSEMOTION) {
+                Clay_SetPointerState((Clay_Vector2){ event.motion.x, event.motion.y }, false);
             } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+                Clay_SetPointerState((Clay_Vector2){ event.button.x, event.button.y }, true);
                 if (event.button.y < 80) {
                     int closed_tab_idx = -1;
                     int ui_action = handle_ui_click(&ui, event.button.x, event.button.y, &closed_tab_idx);
@@ -405,16 +374,17 @@ int main() {
                     }
                 } else {
                     ui.is_focused = 0;
-                    int view_y = event.button.y - 80;
                     browser_tab *tab = &ui.tabs[ui.active_tab];
 
-                    if (!ui_handle_click((dom_node*)tab->tree, event.button.x, view_y, tab->scroll_y)) {
-                        if (check_click((dom_node*)tab->tree, event.button.x, view_y, tab->url, (dom_node**)&tab->tree, 1, &tab->scroll_y, &focused_node, 1)) {
+                    if (!ui_handle_click((dom_node*)tab->tree, event.button.x, event.button.y, tab->scroll_y)) {
+                        if (check_click((dom_node*)tab->tree, event.button.x, event.button.y, tab->url, (dom_node**)&tab->tree, 1, &tab->scroll_y, &focused_node, 1)) {
                             strncpy(ui.input_buffer, tab->url, MAX_URL - 1);
                             pending_load = 1;
                         }
                     }
                 }
+            } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
+                Clay_SetPointerState((Clay_Vector2){ event.button.x, event.button.y }, false);
             } else if (event.type == SDL_MOUSEWHEEL) {
                 ui.tabs[ui.active_tab].scroll_y -= event.wheel.y * 30;
                 if (ui.tabs[ui.active_tab].scroll_y < 0) ui.tabs[ui.active_tab].scroll_y = 0;
@@ -447,28 +417,38 @@ int main() {
         int win_w, win_h;
         SDL_GetWindowSize(window, &win_w, &win_h);
 
-        SDL_SetRenderDrawColor(rend, 255, 255, 255, 255);
-        SDL_RenderClear(rend);
+        Clay_SetLayoutDimensions((Clay_Dimensions) { win_w, win_h });
+        Clay_BeginLayout();
+
+        draw_ui(&ui, win_w);
 
         SDL_Rect viewport = {0, 80, win_w, win_h - 80};
         render_tree((dom_node*)ui.tabs[ui.active_tab].tree, ui.tabs[ui.active_tab].scroll_y, focused_node, viewport);
 
-        draw_ui(rend, &ui, win_w);
-        render_ui_text(rend, &ui);
+        Clay_RenderCommandArray cmds = Clay_EndLayout();
+
+        // retrieve ui rects mapped back to structs to reuse interaction click handler logic
+        ui.add_tab_btn = (SDL_Rect){ Clay_GetElementData(Clay_GetElementId(CLAY_STRING("add_tab_btn"))).boundingBox.x, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("add_tab_btn"))).boundingBox.y, 30, 30 };
+        ui.back_btn = (SDL_Rect){ Clay_GetElementData(Clay_GetElementId(CLAY_STRING("back_btn"))).boundingBox.x, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("back_btn"))).boundingBox.y, 30, 30 };
+        ui.fwd_btn = (SDL_Rect){ Clay_GetElementData(Clay_GetElementId(CLAY_STRING("fwd_btn"))).boundingBox.x, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("fwd_btn"))).boundingBox.y, 30, 30 };
+        ui.url_box = (SDL_Rect){ Clay_GetElementData(Clay_GetElementId(CLAY_STRING("url_box"))).boundingBox.x, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("url_box"))).boundingBox.y, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("url_box"))).boundingBox.width, 30 };
+
+        for (int i = 0; i < ui.tab_count; i++) {
+            Clay_ElementId id = Clay_GetElementIdWithIndex(CLAY_STRING("close_btn"), i);
+            ui.close_btns[i] = (SDL_Rect){ Clay_GetElementData(id).boundingBox.x, Clay_GetElementData(id).boundingBox.y, 16, 16 };
+        }
+
+        if (ui.tabs[ui.active_tab].tree) {
+            update_dom_layouts((dom_node*)ui.tabs[ui.active_tab].tree);
+        }
+
+        SDL_SetRenderDrawColor(rend, 255, 255, 255, 255);
+        SDL_RenderClear(rend);
+
+        clay_sdl_render(rend, cmds);
 
         if (pending_load) {
-            TTF_Font *font = get_ui_font();
-            if (font) {
-                SDL_Surface *surf = TTF_RenderUTF8_Blended(font, "Loading...", (SDL_Color){255, 50, 50, 255});
-                if (surf) {
-                    SDL_Texture *tex = SDL_CreateTextureFromSurface(rend, surf);
-                    SDL_Rect dest = { win_w - surf->w - 20, 45, surf->w, surf->h };
-                    SDL_RenderCopy(rend, tex, NULL, &dest);
-                    SDL_DestroyTexture(tex); SDL_FreeSurface(surf);
-                }
-            }
             SDL_RenderPresent(rend);
-
             load_url(ui.tabs[ui.active_tab].url, (dom_node**)&ui.tabs[ui.active_tab].tree, 1, &ui.tabs[ui.active_tab].scroll_y, &focused_node, 1);
             strncpy(ui.input_buffer, ui.tabs[ui.active_tab].url, MAX_URL - 1);
             update_tab_title(&ui.tabs[ui.active_tab]);
