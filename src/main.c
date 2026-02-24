@@ -2,14 +2,41 @@
 #include <stdlib.h>
 #include <string.h>
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 #include "fetcher.h"
 #include "processor.h"
 #include "renderer.h"
 #include "css.h"
+#include "ui.h"
+#include "interactive_ui.h"
 
-#define MAX_URL 8192
+#ifndef MAX_URL
+#define MAX_URL MAX_URL_LEN
+#endif
 
 void load_url(char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, dom_node **focused_node, int download_assets);
+
+dom_node* find_node_by_tag(dom_node *node, const char *tag) {
+    if (!node || !tag) return NULL;
+    if (node->tag && strcasecmp(node->tag, tag) == 0) return node;
+    for (int i = 0; i < node->child_count; i++) {
+        dom_node *res = find_node_by_tag(node->children[i], tag);
+        if (res) return res;
+    }
+    return NULL;
+}
+
+void update_tab_title(browser_tab *tab) {
+    dom_node *root = (dom_node*)tab->tree;
+    if (!root) return;
+    dom_node *title_node = find_node_by_tag(root, "title");
+    if (title_node && title_node->child_count > 0 && title_node->children[0]->type == NODE_TEXT) {
+        strncpy(tab->title, title_node->children[0]->text, 127);
+        tab->title[127] = '\0';
+    } else {
+        strncpy(tab->title, "web page", 127);
+    }
+}
 
 dom_node* find_text_input(dom_node *node) {
     if (!node) return NULL;
@@ -35,12 +62,12 @@ dom_node* find_element_by_id(dom_node *node, const char *id) {
     return NULL;
 }
 
-void submit_form(dom_node *node, char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, dom_node **focused_node, int download_assets) {
+int submit_form(dom_node *node, char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, dom_node **focused_node, int download_assets) {
     dom_node *form = node;
     while (form && (!form->tag || strcasecmp(form->tag, "form") != 0)) {
         form = form->parent;
     }
-    if (!form) return;
+    if (!form) return 0;
 
     const char *action = get_attribute(form, "action");
     if (!action || action[0] == '\0') action = "/";
@@ -56,7 +83,7 @@ void submit_form(dom_node *node, char *url_buffer, dom_node **tree, int make_tem
     if (strncmp(start, "http://", 7) == 0) start += 7;
         else if (strncmp(start, "https://", 8) == 0) start += 8;
 
-            char *p_delim = strpbrk(start, "/?");
+            const char *p_delim = strpbrk(start, "/?");
     if (p_delim) {
         size_t hlen = p_delim - url_buffer;
         if (hlen >= MAX_URL) hlen = MAX_URL - 1;
@@ -90,7 +117,7 @@ void submit_form(dom_node *node, char *url_buffer, dom_node **tree, int make_tem
     free(current_host);
     free(encoded_val);
 
-    load_url(url_buffer, tree, make_temp, scroll_y, focused_node, download_assets);
+    return 1;
 }
 
 int check_click(dom_node *node, int mx, int my, char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, dom_node **focused_node, int download_assets) {
@@ -106,20 +133,12 @@ int check_click(dom_node *node, int mx, int my, char *url_buffer, dom_node **tre
             printf("clicked link: %s\n", node->href);
 
             if (node->href[0] == '#') {
-                printf("scrolling to fragment: %s\n", node->href);
                 dom_node *target = find_element_by_id(*tree, node->href + 1);
-                if (target) {
-                    *scroll_y = target->layout.y > 40 ? target->layout.y - 40 : 0;
-                } else {
-                    printf("fragment not found in dom\n");
-                }
-                return 1;
+                if (target) *scroll_y = target->layout.y > 40 ? target->layout.y - 40 : 0;
+                return 0;
             }
 
-            if (strncmp(node->href, "javascript:", 11) == 0 || strncmp(node->href, "mailto:", 7) == 0) {
-                printf("ignoring unsupported protocol\n");
-                return 1;
-            }
+            if (strncmp(node->href, "javascript:", 11) == 0 || strncmp(node->href, "mailto:", 7) == 0) return 0;
 
             char *target_url = calloc(1, MAX_URL * 3);
             if (strncmp(node->href, "http://", 7) == 0 || strncmp(node->href, "https://", 8) == 0) {
@@ -132,7 +151,7 @@ int check_click(dom_node *node, int mx, int my, char *url_buffer, dom_node **tre
                 if (strncmp(start, "http://", 7) == 0) start += 7;
                     else if (strncmp(start, "https://", 8) == 0) start += 8;
 
-                        char *p_delim = strpbrk(start, "/?");
+                        const char *p_delim = strpbrk(start, "/?");
                 if (p_delim) {
                     size_t hlen = p_delim - url_buffer;
                     if (hlen >= MAX_URL) hlen = MAX_URL - 1;
@@ -167,7 +186,6 @@ int check_click(dom_node *node, int mx, int my, char *url_buffer, dom_node **tre
             url_buffer[MAX_URL - 1] = '\0';
             free(target_url);
 
-            load_url(url_buffer, tree, make_temp, scroll_y, focused_node, download_assets);
             return 1;
         }
 
@@ -175,17 +193,15 @@ int check_click(dom_node *node, int mx, int my, char *url_buffer, dom_node **tre
             const char *type = get_attribute(node, "type");
             if (!type || strcasecmp(type, "text") == 0 || strcasecmp(type, "search") == 0) {
                 *focused_node = node;
-                return 1;
+                return 0;
             }
             if (type && strcasecmp(type, "submit") == 0) {
-                submit_form(node, url_buffer, tree, make_temp, scroll_y, focused_node, download_assets);
-                return 1;
+                return submit_form(node, url_buffer, tree, make_temp, scroll_y, focused_node, download_assets);
             }
         }
 
         if (node->tag && strcasecmp(node->tag, "button") == 0) {
-            submit_form(node, url_buffer, tree, make_temp, scroll_y, focused_node, download_assets);
-            return 1;
+            return submit_form(node, url_buffer, tree, make_temp, scroll_y, focused_node, download_assets);
         }
     }
 
@@ -216,7 +232,7 @@ void load_url(char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, d
             port = "443";
         }
 
-        char *p_delim = strpbrk(url_start, "/?");
+        const char *p_delim = strpbrk(url_start, "/?");
         if (p_delim) {
             size_t len = p_delim - url_start;
             if (len >= MAX_URL) len = MAX_URL - 1;
@@ -262,7 +278,6 @@ void load_url(char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, d
                                 if (cplen >= MAX_URL) cplen = MAX_URL - 1;
                                 strncpy(new_target, loc, cplen);
 
-                                printf("redirected to: %s\n", new_target);
                                 free(raw_data);
                                 redirect_count++;
                                 is_redirect = 1;
@@ -293,11 +308,9 @@ void load_url(char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, d
                 }
                 *tree = process_response(raw_data, data_size, make_temp);
                 if (*tree) {
-                    char base_url[MAX_URL] = {0};
+                    char base_url[MAX_URL + 16] = {0};
                     snprintf(base_url, sizeof(base_url), "%s://%s", strcmp(port, "443") == 0 ? "https" : "http", hostname);
-                    printf("applying css styles...\n");
                     process_css(*tree, base_url, download_assets);
-                    printf("downloading inline images...\n");
                     load_images(*tree, base_url, download_assets);
                 }
                 free(raw_data);
@@ -310,99 +323,173 @@ void load_url(char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, d
     }
 }
 
-int main() {
-    int make_temp = 1;
-    int download_assets = 1;
+void render_ui_text(SDL_Renderer *rend, browser_ui *ui) {
+    TTF_Font *font = get_ui_font();
+    if (!font) return;
 
-    char url_buffer[MAX_URL] = "en.wikipedia.org/wiki/Donkey_Kong_(character)";
-    dom_node *tree = NULL;
-    int scroll_y = 0;
-    dom_node *focused_node = NULL;
-
-    printf("starting browser process...\n");
-    if (init_renderer() != 0) {
-        printf("fatal error: could not spin up the visual engine. exiting.\n");
-        return 1;
+    int tab_w = 150;
+    for (int i = 0; i < ui->tab_count; i++) {
+        SDL_Surface *surf = TTF_RenderUTF8_Blended(font, ui->tabs[i].title, (SDL_Color){30, 30, 30, 255});
+        if (surf) {
+            SDL_Texture *tex = SDL_CreateTextureFromSurface(rend, surf);
+            int tx = 10 + (i * (tab_w + 5));
+            SDL_Rect dest = { tx + 10, 10, surf->w, surf->h };
+            if (dest.w > tab_w - 30) dest.w = tab_w - 30;
+            SDL_RenderCopy(rend, tex, NULL, &dest);
+            SDL_DestroyTexture(tex); SDL_FreeSurface(surf);
+        }
     }
 
-    SDL_PumpEvents();
-    render_tree(NULL, "loading...", 0, NULL);
+    if (ui->input_buffer[0] != '\0') {
+        SDL_Surface *surf = TTF_RenderUTF8_Blended(font, ui->input_buffer, (SDL_Color){30, 30, 30, 255});
+        if (surf) {
+            SDL_Texture *tex = SDL_CreateTextureFromSurface(rend, surf);
+            SDL_Rect dest = { ui->url_box.x + 10, ui->url_box.y + 5, surf->w, surf->h };
+            if (dest.w > ui->url_box.w - 20) {
+                SDL_Rect src = {surf->w - (ui->url_box.w - 20), 0, ui->url_box.w - 20, surf->h};
+                dest.w = ui->url_box.w - 20;
+                SDL_RenderCopy(rend, tex, &src, &dest);
+            } else {
+                SDL_RenderCopy(rend, tex, NULL, &dest);
+            }
+            SDL_DestroyTexture(tex); SDL_FreeSurface(surf);
+        }
+    }
+}
 
-    load_url(url_buffer, &tree, make_temp, &scroll_y, &focused_node, download_assets);
+int main() {
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) return 1;
+
+    SDL_Window *window = SDL_CreateWindow("c browser", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_MAXIMIZED);
+    SDL_Renderer *rend = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+
+    if (init_renderer(rend) != 0) return 1;
+
+    browser_ui ui;
+    init_ui(&ui);
 
     int running = 1;
+    int pending_load = 1;
     SDL_Event event;
     SDL_StartTextInput();
+    dom_node *focused_node = NULL;
 
     while (running) {
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = 0;
-            } else if (event.type == SDL_MOUSEBUTTONDOWN) {
-                if (event.button.button == SDL_BUTTON_LEFT) {
-                    if (event.button.y > 40) {
+            } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+                if (event.button.y < 80) {
+                    int closed_tab_idx = -1;
+                    int ui_action = handle_ui_click(&ui, event.button.x, event.button.y, &closed_tab_idx);
+                    if (ui_action > 0) {
                         focused_node = NULL;
-                        check_click(tree, event.button.x, event.button.y, url_buffer, &tree, make_temp, &scroll_y, &focused_node, download_assets);
-                    } else {
-                        focused_node = NULL;
+                        if (ui_action == 2) {
+                            if (ui.tabs[closed_tab_idx].tree) {
+                                free_textures((dom_node*)ui.tabs[closed_tab_idx].tree);
+                                free_tree((dom_node*)ui.tabs[closed_tab_idx].tree);
+                            }
+                            for (int i = closed_tab_idx; i < ui.tab_count - 1; i++) {
+                                ui.tabs[i] = ui.tabs[i + 1];
+                            }
+                            ui.tab_count--;
+                            if (ui.tab_count == 0) {
+                                running = 0;
+                            } else {
+                                if (ui.active_tab >= ui.tab_count) ui.active_tab = ui.tab_count - 1;
+                                strncpy(ui.input_buffer, ui.tabs[ui.active_tab].url, MAX_URL - 1);
+                            }
+                        } else if (ui_action == 3) {
+                            pending_load = 1;
+                        }
+                    }
+                } else {
+                    ui.is_focused = 0;
+                    int view_y = event.button.y - 80;
+                    browser_tab *tab = &ui.tabs[ui.active_tab];
+
+                    if (!ui_handle_click((dom_node*)tab->tree, event.button.x, view_y, tab->scroll_y)) {
+                        if (check_click((dom_node*)tab->tree, event.button.x, view_y, tab->url, (dom_node**)&tab->tree, 1, &tab->scroll_y, &focused_node, 1)) {
+                            strncpy(ui.input_buffer, tab->url, MAX_URL - 1);
+                            pending_load = 1;
+                        }
                     }
                 }
             } else if (event.type == SDL_MOUSEWHEEL) {
-                scroll_y -= event.wheel.y * 30;
-                if (scroll_y < 0) scroll_y = 0;
+                ui.tabs[ui.active_tab].scroll_y -= event.wheel.y * 30;
+                if (ui.tabs[ui.active_tab].scroll_y < 0) ui.tabs[ui.active_tab].scroll_y = 0;
             } else if (event.type == SDL_TEXTINPUT) {
-                if (focused_node) {
-                    const char *val = get_attribute(focused_node, "value");
-                    char new_val[MAX_URL] = {0};
-                    if (val) strncpy(new_val, val, sizeof(new_val) - 2);
-                    if (strlen(new_val) + strlen(event.text.text) < sizeof(new_val) - 1) {
-                        strcat(new_val, event.text.text);
-                        set_attribute(focused_node, "value", new_val);
-                    }
-                } else {
-                    if (strlen(url_buffer) + strlen(event.text.text) < sizeof(url_buffer) - 1) {
-                        strcat(url_buffer, event.text.text);
+                if (ui.is_focused) {
+                    if (strlen(ui.input_buffer) + strlen(event.text.text) < MAX_URL - 1) {
+                        strcat(ui.input_buffer, event.text.text);
                     }
                 }
             } else if (event.type == SDL_KEYDOWN) {
-                if (event.key.keysym.sym == SDLK_BACKSPACE) {
-                    if (focused_node) {
-                        const char *val = get_attribute(focused_node, "value");
-                        if (val && strlen(val) > 0) {
-                            char new_val[MAX_URL] = {0};
-                            strncpy(new_val, val, MAX_URL - 1);
-                            new_val[strlen(new_val) - 1] = '\0';
-                            set_attribute(focused_node, "value", new_val);
-                        }
-                    } else if (strlen(url_buffer) > 0) {
-                        url_buffer[strlen(url_buffer) - 1] = '\0';
-                    }
-                } else if (event.key.keysym.sym == SDLK_RETURN) {
-                    if (focused_node) {
-                        submit_form(focused_node, url_buffer, &tree, make_temp, &scroll_y, &focused_node, download_assets);
-                    } else {
-                        load_url(url_buffer, &tree, make_temp, &scroll_y, &focused_node, download_assets);
-                    }
-                } else if (event.key.keysym.sym == SDLK_DOWN) {
-                    scroll_y += 30;
-                } else if (event.key.keysym.sym == SDLK_UP) {
-                    scroll_y -= 30;
-                    if (scroll_y < 0) scroll_y = 0;
+                if (event.key.keysym.sym == SDLK_BACKSPACE && ui.is_focused) {
+                    if (strlen(ui.input_buffer) > 0) ui.input_buffer[strlen(ui.input_buffer) - 1] = '\0';
+                } else if (event.key.keysym.sym == SDLK_RETURN && ui.is_focused) {
+                    char target_url[MAX_URL];
+                    ui_format_search(ui.input_buffer, target_url);
+                    strncpy(ui.tabs[ui.active_tab].url, target_url, MAX_URL - 1);
+                    strncpy(ui.input_buffer, target_url, MAX_URL - 1);
+                    pending_load = 1;
+                    ui.is_focused = 0;
+                } else if (event.key.keysym.sym == SDLK_DOWN && !ui.is_focused) {
+                    ui.tabs[ui.active_tab].scroll_y += 30;
+                } else if (event.key.keysym.sym == SDLK_UP && !ui.is_focused) {
+                    ui.tabs[ui.active_tab].scroll_y -= 30;
+                    if (ui.tabs[ui.active_tab].scroll_y < 0) ui.tabs[ui.active_tab].scroll_y = 0;
                 }
             }
         }
 
-        render_tree(tree, url_buffer, scroll_y, focused_node);
+        ui.is_loading = pending_load;
+        int win_w, win_h;
+        SDL_GetWindowSize(window, &win_w, &win_h);
+
+        SDL_SetRenderDrawColor(rend, 255, 255, 255, 255);
+        SDL_RenderClear(rend);
+
+        SDL_Rect viewport = {0, 80, win_w, win_h - 80};
+        render_tree((dom_node*)ui.tabs[ui.active_tab].tree, ui.tabs[ui.active_tab].scroll_y, focused_node, viewport);
+
+        draw_ui(rend, &ui, win_w);
+        render_ui_text(rend, &ui);
+
+        if (pending_load) {
+            TTF_Font *font = get_ui_font();
+            if (font) {
+                SDL_Surface *surf = TTF_RenderUTF8_Blended(font, "Loading...", (SDL_Color){255, 50, 50, 255});
+                if (surf) {
+                    SDL_Texture *tex = SDL_CreateTextureFromSurface(rend, surf);
+                    SDL_Rect dest = { win_w - surf->w - 20, 45, surf->w, surf->h };
+                    SDL_RenderCopy(rend, tex, NULL, &dest);
+                    SDL_DestroyTexture(tex); SDL_FreeSurface(surf);
+                }
+            }
+            SDL_RenderPresent(rend);
+
+            load_url(ui.tabs[ui.active_tab].url, (dom_node**)&ui.tabs[ui.active_tab].tree, 1, &ui.tabs[ui.active_tab].scroll_y, &focused_node, 1);
+            strncpy(ui.input_buffer, ui.tabs[ui.active_tab].url, MAX_URL - 1);
+            update_tab_title(&ui.tabs[ui.active_tab]);
+            pending_load = 0;
+            continue;
+        }
+
+        SDL_RenderPresent(rend);
         SDL_Delay(16);
     }
 
-    printf("cleaning up and exiting...\n");
-    if (tree) {
-        free_textures(tree);
-        free_tree(tree);
+    for (int i = 0; i < ui.tab_count; i++) {
+        if (ui.tabs[i].tree) {
+            free_textures((dom_node*)ui.tabs[i].tree);
+            free_tree((dom_node*)ui.tabs[i].tree);
+        }
     }
-    SDL_StopTextInput();
-    cleanup_renderer();
 
+    cleanup_renderer();
+    SDL_DestroyRenderer(rend);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
     return 0;
 }

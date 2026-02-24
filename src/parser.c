@@ -18,6 +18,18 @@ void decode_html_entities(char *str) {
             else if (strncmp(read, "&raquo;", 7) == 0) { *write++ = '\xC2'; *write++ = '\xBB'; read += 7; }
             else if (strncmp(read, "&laquo;", 7) == 0) { *write++ = '\xC2'; *write++ = '\xAB'; read += 7; }
             else if (strncmp(read, "&#39;", 5) == 0) { *write++ = '\''; read += 5; }
+            else if (strncmp(read, "&#", 2) == 0) {
+                // parse numeric html entities
+                read += 2;
+                int val = 0;
+                while (*read >= '0' && *read <= '9') {
+                    val = val * 10 + (*read - '0');
+                    read++;
+                }
+                if (*read == ';') read++;
+                if (val > 0 && val < 128) { *write++ = (char)val; }
+                else { *write++ = '?'; }
+            }
             else { *write++ = *read++; }
         } else {
             *write++ = *read++;
@@ -314,3 +326,6 @@ void free_tree(dom_node *root) {
     if (root->children) free(root->children);
     free(root);
 }
+
+
+
