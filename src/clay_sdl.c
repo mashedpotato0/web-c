@@ -24,7 +24,27 @@ void clay_sdl_render(SDL_Renderer *renderer, Clay_RenderCommandArray commands) {
             case CLAY_RENDER_COMMAND_TYPE_BORDER: {
                 Clay_BorderRenderData *config = &cmd->renderData.border;
                 SDL_SetRenderDrawColor(renderer, config->color.r, config->color.g, config->color.b, config->color.a);
-                SDL_RenderDrawRect(renderer, &rect);
+
+                // top line
+                if (config->width.top > 0) {
+                    SDL_Rect t = {rect.x, rect.y, rect.w, config->width.top};
+                    SDL_RenderFillRect(renderer, &t);
+                }
+                // bottom line
+                if (config->width.bottom > 0) {
+                    SDL_Rect b = {rect.x, rect.y + rect.h - config->width.bottom, rect.w, config->width.bottom};
+                    SDL_RenderFillRect(renderer, &b);
+                }
+                // left line
+                if (config->width.left > 0) {
+                    SDL_Rect l = {rect.x, rect.y, config->width.left, rect.h};
+                    SDL_RenderFillRect(renderer, &l);
+                }
+                // right line
+                if (config->width.right > 0) {
+                    SDL_Rect r = {rect.x + rect.w - config->width.right, rect.y, config->width.right, rect.h};
+                    SDL_RenderFillRect(renderer, &r);
+                }
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_TEXT: {

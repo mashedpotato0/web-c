@@ -18,7 +18,6 @@
 
 void load_url(char *url_buffer, dom_node **tree, int make_temp, int *scroll_y, dom_node **focused_node, int download_assets);
 
-// ... dom query helpers stay identical
 dom_node* find_node_by_tag(dom_node *node, const char *tag) {
     if (!node || !tag) return NULL;
     if (node->tag && strcasecmp(node->tag, tag) == 0) return node;
@@ -326,7 +325,6 @@ int main() {
 
     if (init_renderer(rend) != 0) return 1;
 
-    // init clay layout engine
     uint64_t clay_memory_size = Clay_MinMemorySize();
     Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(clay_memory_size, malloc(clay_memory_size));
     Clay_Initialize(arena, (Clay_Dimensions) { 1280, 720 }, (Clay_ErrorHandler) { 0 });
@@ -375,9 +373,11 @@ int main() {
                 } else {
                     ui.is_focused = 0;
                     browser_tab *tab = &ui.tabs[ui.active_tab];
+                    int page_my = event.button.y - 80;
 
-                    if (!ui_handle_click((dom_node*)tab->tree, event.button.x, event.button.y, tab->scroll_y)) {
-                        if (check_click((dom_node*)tab->tree, event.button.x, event.button.y, tab->url, (dom_node**)&tab->tree, 1, &tab->scroll_y, &focused_node, 1)) {
+                    // ui_handle_click adds scroll_y internally, so subtract it to pass pure viewport Y
+                    if (!ui_handle_click((dom_node*)tab->tree, event.button.x, page_my - tab->scroll_y, tab->scroll_y)) {
+                        if (check_click((dom_node*)tab->tree, event.button.x, page_my, tab->url, (dom_node**)&tab->tree, 1, &tab->scroll_y, &focused_node, 1)) {
                             strncpy(ui.input_buffer, tab->url, MAX_URL - 1);
                             pending_load = 1;
                         }
@@ -417,35 +417,63 @@ int main() {
         int win_w, win_h;
         SDL_GetWindowSize(window, &win_w, &win_h);
 
-        Clay_SetLayoutDimensions((Clay_Dimensions) { win_w, win_h });
+        // 1. page layout (isolated)
+        Clay_SetLayoutDimensions((Clay_Dimensions) { win_w, win_h - 80 });
         Clay_BeginLayout();
-
-        draw_ui(&ui, win_w);
-
         SDL_Rect viewport = {0, 80, win_w, win_h - 80};
         render_tree((dom_node*)ui.tabs[ui.active_tab].tree, ui.tabs[ui.active_tab].scroll_y, focused_node, viewport);
+        Clay_RenderCommandArray page_cmds = Clay_EndLayout();
 
-        Clay_RenderCommandArray cmds = Clay_EndLayout();
-
-        // retrieve ui rects mapped back to structs to reuse interaction click handler logic
-        ui.add_tab_btn = (SDL_Rect){ Clay_GetElementData(Clay_GetElementId(CLAY_STRING("add_tab_btn"))).boundingBox.x, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("add_tab_btn"))).boundingBox.y, 30, 30 };
-        ui.back_btn = (SDL_Rect){ Clay_GetElementData(Clay_GetElementId(CLAY_STRING("back_btn"))).boundingBox.x, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("back_btn"))).boundingBox.y, 30, 30 };
-        ui.fwd_btn = (SDL_Rect){ Clay_GetElementData(Clay_GetElementId(CLAY_STRING("fwd_btn"))).boundingBox.x, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("fwd_btn"))).boundingBox.y, 30, 30 };
-        ui.url_box = (SDL_Rect){ Clay_GetElementData(Clay_GetElementId(CLAY_STRING("url_box"))).boundingBox.x, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("url_box"))).boundingBox.y, Clay_GetElementData(Clay_GetElementId(CLAY_STRING("url_box"))).boundingBox.width, 30 };
-
-        for (int i = 0; i < ui.tab_count; i++) {
-            Clay_ElementId id = Clay_GetElementIdWithIndex(CLAY_STRING("close_btn"), i);
-            ui.close_btns[i] = (SDL_Rect){ Clay_GetElementData(id).boundingBox.x, Clay_GetElementData(id).boundingBox.y, 16, 16 };
+        // copy page commands to prevent arena overwrite in pass 2
+        Clay_RenderCommand *page_cmds_copy = NULL;
+        if (page_cmds.length > 0) {
+            page_cmds_copy = malloc(page_cmds.length * sizeof(Clay_RenderCommand));
+            memcpy(page_cmds_copy, page_cmds.internalArray, page_cmds.length * sizeof(Clay_RenderCommand));
         }
+        Clay_RenderCommandArray saved_page_cmds = page_cmds;
+        saved_page_cmds.internalArray = page_cmds_copy;
 
         if (ui.tabs[ui.active_tab].tree) {
             update_dom_layouts((dom_node*)ui.tabs[ui.active_tab].tree);
         }
 
+        // 2. ui layout (isolated)
+        Clay_SetLayoutDimensions((Clay_Dimensions) { win_w, 80 });
+        Clay_BeginLayout();
+        draw_ui(&ui, win_w);
+        Clay_RenderCommandArray ui_cmds = Clay_EndLayout();
+
+        // dynamically bind interaction rects to internal component sizes
+        Clay_ElementData btn_add = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("add_tab_btn")));
+        ui.add_tab_btn = (SDL_Rect){ btn_add.boundingBox.x, btn_add.boundingBox.y, btn_add.boundingBox.width, btn_add.boundingBox.height };
+
+        Clay_ElementData btn_back = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("back_btn")));
+        ui.back_btn = (SDL_Rect){ btn_back.boundingBox.x, btn_back.boundingBox.y, btn_back.boundingBox.width, btn_back.boundingBox.height };
+
+        Clay_ElementData btn_fwd = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("fwd_btn")));
+        ui.fwd_btn = (SDL_Rect){ btn_fwd.boundingBox.x, btn_fwd.boundingBox.y, btn_fwd.boundingBox.width, btn_fwd.boundingBox.height };
+
+        Clay_ElementData box_url = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("url_box")));
+        ui.url_box = (SDL_Rect){ box_url.boundingBox.x, box_url.boundingBox.y, box_url.boundingBox.width, box_url.boundingBox.height };
+
+        for (int i = 0; i < ui.tab_count; i++) {
+            Clay_ElementId id = Clay_GetElementIdWithIndex(CLAY_STRING("close_btn"), i);
+            Clay_ElementData btn_close = Clay_GetElementData(id);
+            ui.close_btns[i] = (SDL_Rect){ btn_close.boundingBox.x, btn_close.boundingBox.y, btn_close.boundingBox.width, btn_close.boundingBox.height };
+        }
+
         SDL_SetRenderDrawColor(rend, 255, 255, 255, 255);
         SDL_RenderClear(rend);
 
-        clay_sdl_render(rend, cmds);
+        // render page layout constrained to viewport
+        SDL_RenderSetViewport(rend, &viewport);
+        clay_sdl_render(rend, saved_page_cmds);
+        if (page_cmds_copy) free(page_cmds_copy);
+
+        // render ui layout over the top
+        SDL_Rect full_viewport = {0, 0, win_w, win_h};
+        SDL_RenderSetViewport(rend, &full_viewport);
+        clay_sdl_render(rend, ui_cmds);
 
         if (pending_load) {
             SDL_RenderPresent(rend);

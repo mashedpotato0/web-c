@@ -47,7 +47,6 @@ int init_renderer(SDL_Renderer *rend) {
     for (int i = 0; i < 7; i++) {
         fonts[i] = TTF_OpenFont("font.ttf", font_sizes[i]);
     }
-
     return 0;
 }
 
@@ -65,17 +64,19 @@ void setup_clay_measure() {
 static int get_css_len(dom_node *node, const char *prop, int def) {
     const char *val = get_style(node, prop);
     if (!val) return def;
-    int num = atoi(val);
-    if (strstr(val, "px")) return num;
-    if (strstr(val, "em") || strstr(val, "rem")) return num * 16;
-    return num;
+    float num = atof(val);
+    if (strstr(val, "px")) return (int)num;
+    if (strstr(val, "em") || strstr(val, "rem")) return (int)(num * 16.0f);
+    if (strstr(val, "vh")) return (int)(num * 7.2f);
+    if (strstr(val, "vw")) return (int)(num * 12.8f);
+    return (int)num;
 }
 
 static int is_block(const char *tag) {
     if (!tag) return 0;
     const char *blocks[] = {
-        "div", "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li",
-        "br", "hr", "table", "tr", "tbody", "thead", "body", "html", "form",
+        "document", "html", "body", "div", "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li",
+        "br", "hr", "table", "tr", "tbody", "thead", "form",
         "header", "footer", "nav", "section", "main", "aside", "figure",
         "dt", "dd", "dl", "center", "article", "summary", "details", NULL
     };
@@ -192,11 +193,23 @@ static void draw_node_clay(dom_node *node) {
             else if (strcasecmp(p->tag, "h2") == 0) font_idx = 5;
             else if (strcasecmp(p->tag, "h3") == 0) font_idx = 4;
             else if (strcasecmp(p->tag, "h4") == 0) font_idx = 3;
+
             if (strcasecmp(p->tag, "a") == 0) current_color = (SDL_Color){25, 100, 210, 255};
 
             const char *color_str = get_style(p, "color");
             if (color_str) { current_color = parse_css_color(color_str, current_color); break; }
             p = p->parent;
+        }
+
+        const char *fs = get_style(node->parent, "font-size");
+        if (fs) {
+            int sz = get_css_len(node->parent, "font-size", font_sizes[font_idx]);
+            int best_diff = 999, best_idx = 2;
+            for(int k=0; k<7; k++) {
+                int diff = abs(font_sizes[k] - sz);
+                if(diff < best_diff) { best_diff = diff; best_idx = k; }
+            }
+            font_idx = best_idx;
         }
 
         Clay_TextElementConfig txt_cfg = {
@@ -206,11 +219,7 @@ static void draw_node_clay(dom_node *node) {
             .wrapMode = CLAY_TEXT_WRAP_WORDS
         };
         Clay_String str = { .chars = node->text, .length = (int)strlen(node->text) };
-        uint32_t node_idx = (uint32_t)((uintptr_t)node & 0xFFFFFFFF);
-
-        Clay__OpenElementWithId(CLAY_IDI("node", node_idx));
         Clay__OpenTextElement(str, &txt_cfg);
-        Clay__CloseElement();
         return;
     }
 
@@ -222,31 +231,86 @@ static void draw_node_clay(dom_node *node) {
             }
 
             const char *display = get_style(node, "display");
-        if (display && strstr(display, "none")) return;
+        if (display && strstr(display, "none")) {
+            if (!node->tag || (strcasecmp(node->tag, "html") != 0 &&
+                strcasecmp(node->tag, "body") != 0 &&
+                strcasecmp(node->tag, "document") != 0)) {
+                return;
+                }
+        }
 
-        Clay_ElementDeclaration decl = {0};
         uint32_t node_idx = (uint32_t)((uintptr_t)node & 0xFFFFFFFF);
 
-        int mt = get_css_len(node, "margin-top", 0);
-        int mb = get_css_len(node, "margin-bottom", 0);
-        int ml = get_css_len(node, "margin-left", 0);
-        int mr = get_css_len(node, "margin-right", 0);
+        int is_blk = is_block(node->tag) || (display && strstr(display, "block"));
+        int is_flex = display && strstr(display, "flex");
+        const char *flex_dir = get_style(node, "flex-direction");
+
+        // evaluate nested content to properly stack inline html elements
+        int has_block_children = 0;
+        for (int i = 0; i < node->child_count; i++) {
+            if (node->children[i]->type == NODE_ELEMENT && is_block(node->children[i]->tag)) {
+                has_block_children = 1;
+                break;
+            }
+        }
+
+        Clay_ElementDeclaration decl = {0};
+
         int pt = get_css_len(node, "padding-top", 0);
         int pb = get_css_len(node, "padding-bottom", 0);
         int pl = get_css_len(node, "padding-left", 0);
         int pr = get_css_len(node, "padding-right", 0);
 
+        int mt = get_css_len(node, "margin-top", 0);
+        int mb = get_css_len(node, "margin-bottom", 0);
+        int ml = get_css_len(node, "margin-left", 0);
+        int mr = get_css_len(node, "margin-right", 0);
+
         if (node->tag && (strcasecmp(node->tag, "ul") == 0 || strcasecmp(node->tag, "ol") == 0 || strcasecmp(node->tag, "blockquote") == 0)) pl += 40;
 
         decl.layout.padding = (Clay_Padding){pl + ml, pr + mr, pt + mt, pb + mb};
-        decl.layout.childGap = 5;
 
-        if (is_block(node->tag)) {
-            decl.layout.sizing.width = CLAY_SIZING_GROW();
-            decl.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
-        } else {
-            decl.layout.sizing.width = CLAY_SIZING_FIT();
-            decl.layout.layoutDirection = CLAY_LEFT_TO_RIGHT;
+        const char *gap = get_style(node, "gap");
+        decl.layout.childGap = gap ? get_css_len(node, "gap", 0) : 2;
+
+        if (is_flex && flex_dir && strstr(flex_dir, "column")) decl.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
+        else if (is_flex) decl.layout.layoutDirection = CLAY_LEFT_TO_RIGHT;
+        else if (is_blk) decl.layout.layoutDirection = has_block_children ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT;
+        else decl.layout.layoutDirection = CLAY_LEFT_TO_RIGHT;
+
+        const char *align = get_style(node, "align-items");
+        const char *justify = get_style(node, "justify-content");
+        const char *ta = get_style(node, "text-align");
+
+        int is_col = (decl.layout.layoutDirection == CLAY_TOP_TO_BOTTOM);
+        if (align) {
+            if (strstr(align, "center")) {
+                if (is_col) decl.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+                else decl.layout.childAlignment.y = CLAY_ALIGN_Y_CENTER;
+            }
+            if (strstr(align, "end")) {
+                if (is_col) decl.layout.childAlignment.x = CLAY_ALIGN_X_RIGHT;
+                else decl.layout.childAlignment.y = CLAY_ALIGN_Y_BOTTOM;
+            }
+        }
+        if (justify) {
+            if (strstr(justify, "center")) {
+                if (is_col) decl.layout.childAlignment.y = CLAY_ALIGN_Y_CENTER;
+                else decl.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+            }
+            if (strstr(justify, "end")) {
+                if (is_col) decl.layout.childAlignment.y = CLAY_ALIGN_Y_BOTTOM;
+                else decl.layout.childAlignment.x = CLAY_ALIGN_X_RIGHT;
+            }
+            if (strstr(justify, "space-between")) {
+                if (is_col) decl.layout.childAlignment.y = CLAY_ALIGN_Y_CENTER;
+                else decl.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+            }
+        }
+
+        if (ta) {
+            if (strstr(ta, "center")) decl.layout.childAlignment.x = CLAY_ALIGN_X_CENTER;
+            if (strstr(ta, "right")) decl.layout.childAlignment.x = CLAY_ALIGN_X_RIGHT;
         }
 
         const char *bg = get_style(node, "background-color");
@@ -255,17 +319,75 @@ static void draw_node_clay(dom_node *node) {
             decl.backgroundColor = (Clay_Color){col.r, col.g, col.b, col.a};
         }
 
-        if (node->tag && strcasecmp(node->tag, "img") == 0) {
-            decl.layout.sizing.width = CLAY_SIZING_FIXED(node->img_w > 0 ? node->img_w : 50);
-            decl.layout.sizing.height = CLAY_SIZING_FIXED(node->img_h > 0 ? node->img_h : 50);
-            decl.image = (Clay_ImageElementConfig){.imageData = node->texture};
+        const char *bd = get_style(node, "border");
+        if (bd && !strstr(bd, "none") && !strstr(bd, "0px")) {
+            int bw = get_css_len(node, "border-width", 1);
+            if (bw <= 0) bw = 1;
+            SDL_Color bc = {0, 0, 0, 255};
+            if (strstr(bd, "rgba") || strstr(bd, "#") || strstr(bd, "rgb")) {
+                const char *hash = strstr(bd, "#");
+                if (hash) bc = parse_css_color(hash, bc);
+                else if (strstr(bd, "rgb")) bc = parse_css_color(strstr(bd, "rgb"), bc);
+            } else {
+                const char *last_space = strrchr(bd, ' ');
+                if (last_space) bc = parse_css_color(last_space + 1, bc);
+            }
+            decl.border = (Clay_BorderElementConfig){.width = {bw, bw, bw, bw}, .color = {bc.r, bc.g, bc.b, bc.a}};
+        }
+
+        const char *br = get_style(node, "border-radius");
+        if (br) {
+            int rad = get_css_len(node, "border-radius", 0);
+            decl.cornerRadius = (Clay_CornerRadius){rad, rad, rad, rad};
+        }
+
+        const char *w_str = get_style(node, "width");
+        if (w_str) {
+            if (strstr(w_str, "%")) decl.layout.sizing.width = CLAY_SIZING_PERCENT(atof(w_str) / 100.0f);
+            else if (!strstr(w_str, "auto")) decl.layout.sizing.width = CLAY_SIZING_FIXED(get_css_len(node, "width", 0));
+            else decl.layout.sizing.width = is_blk ? CLAY_SIZING_GROW() : CLAY_SIZING_FIT();
+        } else if (is_blk || (is_flex && (!flex_dir || strstr(flex_dir, "row")))) {
+            decl.layout.sizing.width = CLAY_SIZING_GROW();
+        } else {
+            decl.layout.sizing.width = CLAY_SIZING_FIT();
+        }
+
+        const char *h_str = get_style(node, "height");
+        if (h_str) {
+            if (strstr(h_str, "%")) decl.layout.sizing.height = CLAY_SIZING_PERCENT(atof(h_str) / 100.0f);
+            else if (!strstr(h_str, "auto")) decl.layout.sizing.height = CLAY_SIZING_FIXED(get_css_len(node, "height", 0));
+        } else {
+            decl.layout.sizing.height = CLAY_SIZING_FIT();
+        }
+
+        if (node->tag && strcasecmp(node->tag, "br") == 0) {
+            decl.layout.sizing.width = CLAY_SIZING_GROW();
+            decl.layout.sizing.height = CLAY_SIZING_FIXED(8);
         }
 
         if (node->tag && (strcasecmp(node->tag, "input") == 0 || strcasecmp(node->tag, "button") == 0)) {
-            decl.layout.sizing.width = CLAY_SIZING_FIT();
+            const char *type = get_attribute(node, "type");
+            int is_txt_input = (!type || strcasecmp(type, "text") == 0 || strcasecmp(type, "search") == 0);
+
+            if (is_txt_input && !w_str) decl.layout.sizing.width = CLAY_SIZING_FIXED(200);
+            else if (!w_str) decl.layout.sizing.width = CLAY_SIZING_FIT();
+
             decl.layout.sizing.height = CLAY_SIZING_FIXED(28);
             decl.backgroundColor = (Clay_Color){240, 240, 240, 255};
             decl.layout.padding = (Clay_Padding){10, 10, 5, 5};
+            decl.border = (Clay_BorderElementConfig){.width = {1, 1, 1, 1}, .color = {150, 150, 150, 255}};
+            decl.cornerRadius = (Clay_CornerRadius){4, 4, 4, 4};
+        }
+
+        if (node->tag && strcasecmp(node->tag, "img") == 0) {
+            int iw = node->img_w > 0 ? node->img_w : 50;
+            int ih = node->img_h > 0 ? node->img_h : 50;
+            if (w_str && !strstr(w_str, "%")) iw = get_css_len(node, "width", iw);
+            if (h_str && !strstr(h_str, "%")) ih = get_css_len(node, "height", ih);
+
+            decl.layout.sizing.width = CLAY_SIZING_FIXED(iw);
+            decl.layout.sizing.height = CLAY_SIZING_FIXED(ih);
+            decl.image = (Clay_ImageElementConfig){.imageData = node->texture};
         }
 
         Clay__OpenElementWithId(CLAY_IDI("node", node_idx));
@@ -277,8 +399,9 @@ static void draw_node_clay(dom_node *node) {
             if (!label) label = get_attribute(node, "placeholder");
             if (!label) label = is_btn ? " Submit" : " ";
 
-            Clay_TextElementConfig txt_cfg = { .textColor = {50, 50, 50, 255}, .fontId = 2, .fontSize = 16 };
+            Clay_TextElementConfig txt_cfg = { .textColor = {50, 50, 50, 255}, .fontId = 2, .fontSize = 16, .wrapMode = CLAY_TEXT_WRAP_NONE };
             Clay_String str = { .chars = label, .length = (int)strlen(label) };
+
             Clay__OpenTextElement(str, &txt_cfg);
         }
 
@@ -312,7 +435,7 @@ void render_tree(dom_node *root, int scroll_y, dom_node *focused_node, SDL_Rect 
     decl.layout.sizing.width = CLAY_SIZING_GROW();
     decl.layout.sizing.height = CLAY_SIZING_FIT();
     decl.layout.layoutDirection = CLAY_TOP_TO_BOTTOM;
-    decl.floating.offset = (Clay_Vector2){0, -scroll_y};
+    decl.floating.offset = (Clay_Vector2){0, -(float)scroll_y};
 
     Clay__OpenElementWithId(CLAY_ID("page_content"));
     Clay__ConfigureOpenElement(decl);

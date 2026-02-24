@@ -1,3 +1,5 @@
 *.html
 external/*
 temp_assets/*
+*.gz
+*.zip
